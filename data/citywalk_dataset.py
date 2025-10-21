@@ -310,15 +310,19 @@ class CityWalkDataset(Dataset):
             raise NotImplementedError(f"Coordinate embedding type {self.cfg.model.cord_embedding} not implemented")
         waypoints_transformed = self.transform_waypoints(waypoint_poses, current_pose)
 
-        # Convert data to tensors
-        input_positions = torch.tensor(transformed_input_positions, dtype=torch.float32)
-        waypoints_transformed = torch.tensor(waypoints_transformed[:, [0, 2]], dtype=torch.float32)
-        step_scale = torch.tensor(self.step_scale[video_idx], dtype=torch.float32)
+        # Convert data to tensors - ensure all tensors are independent copies
+        input_positions = torch.tensor(transformed_input_positions, dtype=torch.float32).clone()
+        waypoints_transformed = torch.tensor(waypoints_transformed[:, [0, 2]], dtype=torch.float32).clone()
+        step_scale = torch.tensor(self.step_scale[video_idx], dtype=torch.float32).clone()
         step_scale = torch.clamp(step_scale, min=1e-2)
-        input_positions_scaled = input_positions / step_scale
-        waypoints_scaled = waypoints_transformed / step_scale
+        input_positions_scaled = (input_positions / step_scale).clone()
+        waypoints_scaled = (waypoints_transformed / step_scale).clone()
         input_positions_scaled[:self.context_size-1] += torch.randn(self.context_size-1, 2) * self.input_noise
-        arrived = torch.tensor(arrived, dtype=torch.float32)
+        arrived = torch.tensor(arrived, dtype=torch.float32).clone()
+        
+        # Ensure frames are contiguous and independent
+        frames = frames.contiguous().clone()
+        
         sample = {
             'video_frames': frames,
             'input_positions': input_positions_scaled,
@@ -329,8 +333,8 @@ class CityWalkDataset(Dataset):
         
         # Add depth data to sample if available
         if self.use_dbr and depth_map is not None:
-            sample['depth_map'] = torch.tensor(depth_map, dtype=torch.float32)
-            sample['depth_mask'] = torch.tensor(depth_mask, dtype=torch.bool)
+            sample['depth_map'] = torch.from_numpy(np.ascontiguousarray(depth_map)).float().clone()
+            sample['depth_mask'] = torch.from_numpy(np.ascontiguousarray(depth_mask)).bool().clone()
 
         # For visualization during validation
         if self.mode in ['val', 'test']:
@@ -338,13 +342,13 @@ class CityWalkDataset(Dataset):
             transformed_original_input_positions = self.transform_poses(original_input_poses, current_pose)
             target_transformed = self.transform_target_pose(target_pose, current_pose)
 
-            original_input_positions = torch.tensor(transformed_original_input_positions[:, [0, 2]], dtype=torch.float32)
+            original_input_positions = torch.tensor(transformed_original_input_positions[:, [0, 2]], dtype=torch.float32).clone()
             # noisy_input_positions = torch.tensor(vis_input_positions[:, [0, 2]], dtype=torch.float32)
-            noisy_input_positions = input_positions_scaled[:-1] * step_scale
-            target_transformed_position = torch.tensor(target_transformed[[0, 2]], dtype=torch.float32)  # Only X and Z
+            noisy_input_positions = (input_positions_scaled[:-1] * step_scale).clone()
+            target_transformed_position = torch.tensor(target_transformed[[0, 2]], dtype=torch.float32).clone()  # Only X and Z
             sample['original_input_positions'] = original_input_positions
             sample['noisy_input_positions'] = noisy_input_positions
-            sample['gt_waypoints'] = waypoints_transformed
+            sample['gt_waypoints'] = waypoints_transformed.clone()
             sample['target_transformed'] = target_transformed_position  # Add target coordinate
         return sample
 
