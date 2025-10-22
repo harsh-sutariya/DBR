@@ -487,7 +487,11 @@ class CityWalkFeatDataset(Dataset):
     #     return input_poses
 
     def process_frames(self, frames):
-        frames = torch.tensor(frames).permute(0, 3, 1, 2).float() / 255.0  # Corrected normalization
+        # Convert to tensor and normalize - ensure contiguous and independent
+        frames = torch.tensor(frames, dtype=torch.float32).permute(0, 3, 1, 2).contiguous()
+        frames = frames / 255.0
+        frames = frames.clone()  # Ensure independent copy after division
+        
         # Desired resolution
         desired_height = 360
         desired_width = 640
@@ -507,18 +511,18 @@ class CityWalkFeatDataset(Dataset):
             pad_left = pad_width // 2
             pad_right = pad_width - pad_left
             
-            # Apply padding
+            # Apply padding and clone to ensure independent copy
             frames = TF.pad(
                 frames, 
                 (pad_left, pad_top, pad_right, pad_bottom),
-            )
+            ).clone()
             
             # Optional: Verify the new shape
             assert frames.shape[2] == desired_height and frames.shape[3] == desired_width, \
                 f"Padded frames have incorrect shape: {frames.shape}. Expected ({desired_height}, {desired_width})"
             
-        if pad_height < 0  or pad_width < 0:
-            frames = TF.center_crop(frames, (desired_height, desired_width))
+        if pad_height < 0 or pad_width < 0:
+            frames = TF.center_crop(frames, (desired_height, desired_width)).clone()
         
         return frames
 
