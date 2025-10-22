@@ -346,8 +346,9 @@ class CityWalkFeatDataset(Dataset):
 
         # Process frames
         frames = self.process_frames(frames)
-        input_frames = frames[:self.context_size]
-        target_frames = frames[self.context_size:]
+        # Clone immediately after slicing to avoid view issues
+        input_frames = frames[:self.context_size].clone()
+        target_frames = frames[self.context_size:].clone()
 
         # Get pose data
         pose = self.poses[video_idx]
@@ -391,10 +392,6 @@ class CityWalkFeatDataset(Dataset):
         waypoints_scaled = (waypoints_transformed / step_scale).clone()
         input_positions_scaled[:self.context_size-1] += torch.randn(self.context_size-1, 2) * self.input_noise
         arrived = torch.tensor(arrived, dtype=torch.float32).clone()
-        
-        # Ensure video frames are contiguous and independent
-        input_frames = input_frames.contiguous().clone()
-        target_frames = target_frames.contiguous().clone()
         
         sample = {
             'video_frames': input_frames,

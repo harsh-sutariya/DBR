@@ -271,6 +271,8 @@ class CityWalkDataset(Dataset):
 
         # Process frames
         frames = self.process_frames(frames)
+        # Clone to ensure independent copy (frames is a tensor after process_frames)
+        frames = frames.clone()
         
         # Load depth frames if DBR is enabled
         # For online mode, pass the last frame tensor
@@ -319,9 +321,6 @@ class CityWalkDataset(Dataset):
         waypoints_scaled = (waypoints_transformed / step_scale).clone()
         input_positions_scaled[:self.context_size-1] += torch.randn(self.context_size-1, 2) * self.input_noise
         arrived = torch.tensor(arrived, dtype=torch.float32).clone()
-        
-        # Ensure frames are contiguous and independent
-        frames = frames.contiguous().clone()
         
         sample = {
             'video_frames': frames,
