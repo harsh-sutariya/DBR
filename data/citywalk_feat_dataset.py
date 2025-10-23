@@ -503,26 +503,29 @@ class CityWalkFeatDataset(Dataset):
         pad_height = desired_height - H
         pad_width = desired_width - W
         
-        # Only pad if necessary
+        # Pad if too small
         if pad_height > 0 or pad_width > 0:
             # Calculate padding for each side (left, right, top, bottom)
-            pad_top = pad_height // 2
-            pad_bottom = pad_height - pad_top
-            pad_left = pad_width // 2
-            pad_right = pad_width - pad_left
+            pad_top = max(0, pad_height // 2)
+            pad_bottom = max(0, pad_height - pad_top)
+            pad_left = max(0, pad_width // 2)
+            pad_right = max(0, pad_width - pad_left)
             
             # Apply padding and clone to ensure independent copy
             frames = TF.pad(
                 frames, 
                 (pad_left, pad_top, pad_right, pad_bottom),
             ).clone()
-            
-            # Optional: Verify the new shape
-            assert frames.shape[2] == desired_height and frames.shape[3] == desired_width, \
-                f"Padded frames have incorrect shape: {frames.shape}. Expected ({desired_height}, {desired_width})"
-            
-        if pad_height < 0 or pad_width < 0:
+        
+        # Crop if too large (check current size after potential padding)
+        _, _, H, W = frames.shape
+        if H > desired_height or W > desired_width:
             frames = TF.center_crop(frames, (desired_height, desired_width)).clone()
+        
+        # Final verification to ensure correct size
+        _, _, H, W = frames.shape
+        assert H == desired_height and W == desired_width, \
+            f"Frames have incorrect shape: {frames.shape}. Expected (*, *, {desired_height}, {desired_width})"
         
         return frames
 

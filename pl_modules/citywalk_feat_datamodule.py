@@ -23,6 +23,30 @@ def citywalk_collate(batch):
                     filled.append(torch.zeros_like(template))
                 else:
                     filled.append(item.clone())
+            
+            # Check if all tensors have the same shape
+            shapes = [t.shape for t in filled]
+            if len(set(shapes)) > 1:
+                # Handle mismatched shapes by padding to maximum dimensions
+                print(f"Warning: Mismatched tensor shapes in batch: {shapes}")
+                # Find maximum dimensions for each axis
+                ndim = len(shapes[0])
+                max_shape = [max(s[i] for s in shapes) for i in range(ndim)]
+                
+                # Pad tensors to match maximum dimensions
+                padded = []
+                for tensor in filled:
+                    if list(tensor.shape) != max_shape:
+                        # Calculate padding needed
+                        padding = []
+                        for i in range(ndim - 1, -1, -1):  # Reverse order for F.pad
+                            diff = max_shape[i] - tensor.shape[i]
+                            padding.extend([0, diff])
+                        # Pad tensor
+                        tensor = torch.nn.functional.pad(tensor, padding, mode='constant', value=0)
+                    padded.append(tensor)
+                filled = padded
+            
             return torch.stack(filled, dim=0)
 
         if isinstance(template, (float, int)):
