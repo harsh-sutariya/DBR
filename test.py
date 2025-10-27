@@ -5,9 +5,11 @@ import argparse
 import yaml
 import os
 from pl_modules.citywalk_datamodule import CityWalkDataModule
+from pl_modules.citywalk_feat_datamodule import CityWalkFeatDataModule
 from pl_modules.teleop_datamodule import TeleopDataModule
 from pl_modules.citywalker_module import CityWalkerModule
 from pl_modules.citywalker_feat_module import CityWalkerFeatModule
+from pytorch_lightning.strategies import DDPStrategy
 import torch
 import glob
 
@@ -75,10 +77,12 @@ def main():
     # Initialize the DataModule
     if cfg.data.type == 'citywalk':
         datamodule = CityWalkDataModule(cfg)
+    elif cfg.data.type == 'citywalk_feat':
+        datamodule = CityWalkFeatDataModule(cfg)
     elif cfg.data.type == 'teleop':
         datamodule = TeleopDataModule(cfg)
     else:
-        raise ValueError(f"Invalid dataset: {cfg.data.dataset}")
+        raise ValueError(f"Invalid dataset type: {cfg.data.type}")
 
     # Determine the checkpoint path
     if args.checkpoint:
@@ -99,19 +103,29 @@ def main():
     elif cfg.model.type == 'citywalker_feat':
         model = CityWalkerFeatModule.load_from_checkpoint(checkpoint_path, cfg=cfg)
     else:
-        raise ValueError(f"Invalid model: {cfg.model.type}")
+        raise ValueError(f"Invalid model type: {cfg.model.type}")
     model.result_dir = test_dir
     print(f"Loaded model from checkpoint: {checkpoint_path}")
 
-    # Initialize Trainer
-    trainer = pl.Trainer(
-        default_root_dir=test_dir,
-        devices=cfg.training.gpus,
-        precision='16-mixed' if cfg.training.amp else 32,
-        accelerator='ddp' if cfg.training.gpus > 1 else 'gpu',
-        logger=False
-        # You can add more Trainer arguments if needed
-    )
+    # Initialize Trainer (consistent with training configuration)
+    num_gpu = torch.cuda.device_count()
+    if num_gpu > 1:
+        trainer = pl.Trainer(
+            default_root_dir=test_dir,
+            devices=num_gpu,
+            precision='16-mixed' if cfg.training.amp else 32,
+            accelerator='gpu',
+            logger=False,
+            strategy=DDPStrategy(find_unused_parameters=True)
+        )
+    else:
+        trainer = pl.Trainer(
+            default_root_dir=test_dir,
+            devices=num_gpu,
+            precision='16-mixed' if cfg.training.amp else 32,
+            accelerator='gpu',
+            logger=False
+        )
 
     # Run testing
     trainer.test(model, datamodule=datamodule, verbose=True)

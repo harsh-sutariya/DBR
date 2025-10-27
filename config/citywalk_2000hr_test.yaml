@@ -1,6 +1,6 @@
 project:
-  name: 'CityWalker'
-  run_name: 'test_dbr_fixed'
+  name: 'CityWalker'  
+  run_name: 'test_2000hr_fresh'
   result_dir: 'results'
 
 training:
@@ -21,43 +21,17 @@ scheduler:
 optimizer:
   name: 'adamw'
   lr: 2e-4
-  weight_decay: 0.0
 
 model:
   type: 'citywalker_feat'
   do_rgb_normalize: true
   do_resize: true
-  
-  # Enable DBR (Depth Barrier Regularization)
-  use_dbr: true
-  
-  # DBR configuration
-  dbr:
-    # Number of yaw bins for polar reduction
-    num_bins: 32
-    # Temperature for soft-min (higher = sharper)
-    temperature: 20.0
-    # Ratio of bottom image to crop (focus on ground obstacles)
-    crop_bottom_ratio: 0.6
-    # Horizontal field of view in degrees
-    fov_horizontal: 90.0
-    # Safety margin τ in meters
-    margin: 0.5
-    # Loss weight λ_bar
-    weight: 1.0
-    # Camera intrinsics (adjust based on your dataset)
-    fx: 320.0
-    fy: 320.0
-    cx: 320.0
-    cy: 180.0
-  
   obs_encoder:
     type: 'dinov2_vitb14'
     context_size: 5
     crop: [350, 630]
     resize: [350, 630]
     freeze: true
-  
   output_coordinate_repr: 'euclidean'
 
   cord_embedding:
@@ -81,27 +55,22 @@ data:
   # Relative paths from vast_path root (videos are directly in citywalk_2min/, poses in citywalk_2min/poses/)
   video_dir: 'citywalk_2min'
   pose_dir: 'citywalk_2min/poses'
-  depth_dir: 'depths'
-  # Whether to cache depth in memory ('on_the_fly' or 'preload')
-  depth_cache_mode: 'preload'  # Preload depth for faster access
-  
-  num_workers: 1  # Reduced for testing to avoid worker overhead
+  num_workers: 4
   pose_fps: 5
   video_fps: 30
   target_fps: 1
   num_train: 50000
   num_val: 1000
-  num_test: 100  # Reduced for faster testing
-  input_noise: 0.1
-  search_window: 50
-  arrived_threshold: 5
+  num_test: 1000  # Enable test set for evaluation
+  input_noise: 0.1 # sigma (after normalization)
+  search_window: 50 # frames
+  arrived_threshold: 5 # num frame
   arrived_prob: 0.3
 
 validation:
-  num_visualize: 100
-
+  num_visualize: 400
 testing:
-  num_visualize: 10  # Reduced for faster testing
+  num_visualize: 400
 
 logging:
   enable_wandb: false  # Disable wandb for testing

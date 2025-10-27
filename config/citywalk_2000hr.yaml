@@ -12,6 +12,7 @@ training:
   resume: false
   direction_loss_weight: 5.0
   feature_loss_weight: 0.1
+  test_after_training: true
 
 scheduler:
   name: 'cosine'

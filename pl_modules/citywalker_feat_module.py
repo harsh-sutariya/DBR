@@ -148,7 +148,11 @@ class CityWalkerFeatModule(pl.LightningModule):
         depth_map = batch.get('depth_map', None) if self.use_dbr else None
         depth_mask = batch.get('depth_mask', None) if self.use_dbr else None
         
-        if self.datatype == "citywalk":
+        # Initialize variables to avoid UnboundLocalError
+        wp_pred = None
+        arrive_pred = None
+        
+        if self.datatype == "citywalk" or self.datatype == "citywalk_feat":
             wp_pred, arrive_pred, _, _ = self(obs, cord, future_obs, depth_map, depth_mask)
             # Compute L1 loss for waypoints
             waypoints_target = batch['waypoints']
@@ -244,27 +248,28 @@ class CityWalkerFeatModule(pl.LightningModule):
 
         
         # Handle visualization
-        if self.datatype == "citywalk":
-            wp_pred *= batch['step_scale'].unsqueeze(-1).unsqueeze(-1)
-        if self.output_coordinate_repr == "euclidean":
-            self.process_visualization(
-                mode='test',
-                batch=batch,
-                obs=obs,
-                wp_pred=wp_pred,
-                arrive_pred=arrive_pred
-            )
-        elif self.output_coordinate_repr == "polar":
-            self.process_visualization(
-                mode='test',
-                batch=batch,
-                obs=obs,
-                wp_pred=wp_pred,
-                arrive_pred=arrive_pred
-            )
+        if wp_pred is not None and arrive_pred is not None:
+            if self.datatype == "citywalk" or self.datatype == "citywalk_feat":
+                wp_pred *= batch['step_scale'].unsqueeze(-1).unsqueeze(-1)
+            if self.output_coordinate_repr == "euclidean":
+                self.process_visualization(
+                    mode='test',
+                    batch=batch,
+                    obs=obs,
+                    wp_pred=wp_pred,
+                    arrive_pred=arrive_pred
+                )
+            elif self.output_coordinate_repr == "polar":
+                self.process_visualization(
+                    mode='test',
+                    batch=batch,
+                    obs=obs,
+                    wp_pred=wp_pred,
+                    arrive_pred=arrive_pred
+                )
 
     def on_test_epoch_end(self):
-        if self.datatype == "citywalk":
+        if self.datatype == "citywalk" or self.datatype == "citywalk_feat":
             for metric in self.test_metrics:
                 metric_array = np.array(self.test_metrics[metric])
                 save_path = os.path.join(self.result_dir, f'test_{metric}.npy')
@@ -310,7 +315,7 @@ class CityWalkerFeatModule(pl.LightningModule):
 
     def on_test_epoch_start(self):
         self.vis_count = 0
-        if self.datatype == "citywalk":
+        if self.datatype == "citywalk" or self.datatype == "citywalk_feat":
             if self.output_coordinate_repr == "euclidean":
                 self.test_metrics = {'l1_loss': [], 'arrived_accuracy': [], 'mean_angle': []}
             elif self.output_coordinate_repr == "polar":

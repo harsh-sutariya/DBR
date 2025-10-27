@@ -85,7 +85,7 @@ def main():
     elif cfg.data.type == 'citywalk_feat':
         datamodule = CityWalkFeatDataModule(cfg)
     else:
-        raise ValueError(f"Invalid dataset: {cfg.data.dataset}")
+        raise ValueError(f"Invalid dataset type: {cfg.data.type}")
 
     # Initialize the model
     if cfg.model.type == 'citywalker':
@@ -194,6 +194,61 @@ def main():
     else:
         # Start training
         trainer.fit(model, datamodule=datamodule)
+    
+    # Run testing after training completes (if enabled in config)
+    test_after_training = getattr(cfg.training, 'test_after_training', False)
+    if test_after_training:
+        print("\n" + "="*50)
+        print("Training completed. Starting testing...")
+        print("="*50)
+        
+        # Find the best checkpoint for testing
+        checkpoint_dir = os.path.join(result_dir, 'checkpoints')
+        try:
+            best_checkpoint = find_latest_checkpoint(checkpoint_dir)
+            print(f"Using checkpoint for testing: {best_checkpoint}")
+            
+            # Load the best model for testing
+            if cfg.model.type == 'citywalker':
+                test_model = CityWalkerModule.load_from_checkpoint(best_checkpoint, cfg=cfg)
+            elif cfg.model.type == 'citywalker_feat':
+                test_model = CityWalkerFeatModule.load_from_checkpoint(best_checkpoint, cfg=cfg)
+            else:
+                raise ValueError(f"Invalid model type: {cfg.model.type}")
+            
+            # Set up test directory
+            test_dir = os.path.join(result_dir, 'test')
+            os.makedirs(test_dir, exist_ok=True)
+            test_model.result_dir = test_dir
+            
+            # Create a new trainer specifically for testing (consistent with training trainer)
+            if num_gpu > 1:
+                test_trainer = pl.Trainer(
+                    default_root_dir=test_dir,
+                    devices=num_gpu,
+                    precision='16-mixed' if cfg.training.amp else 32,
+                    accelerator='gpu',
+                    logger=False,
+                    strategy=DDPStrategy(find_unused_parameters=True)
+                )
+            else:
+                test_trainer = pl.Trainer(
+                    default_root_dir=test_dir,
+                    devices=num_gpu,
+                    precision='16-mixed' if cfg.training.amp else 32,
+                    accelerator='gpu',
+                    logger=False
+                )
+            
+            # Run testing
+            test_trainer.test(test_model, datamodule=datamodule, verbose=True)
+            print(f"Testing completed. Results saved to: {test_dir}")
+            
+        except FileNotFoundError as e:
+            print(f"Could not find checkpoint for testing: {e}")
+            print("Skipping testing phase.")
+    else:
+        print("\nTraining completed. Set 'test_after_training: true' in config to run testing automatically.")
 
 if __name__ == '__main__':
     main()
