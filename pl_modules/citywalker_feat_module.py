@@ -59,7 +59,8 @@ class CityWalkerFeatModule(pl.LightningModule):
         else:
             future_obs = None
         
-        # Extract depth data if DBR is enabled
+        # Extract depth data - only used if DBR is enabled during training
+        # Depth is also loaded for val/test even when use_dbr=False for evaluation metrics
         depth_map = batch.get('depth_map', None) if self.use_dbr else None
         depth_mask = batch.get('depth_mask', None) if self.use_dbr else None
         
@@ -76,12 +77,55 @@ class CityWalkerFeatModule(pl.LightningModule):
             # Scale waypoints back to metric space for DBR
             step_scale = batch['step_scale'].unsqueeze(-1).unsqueeze(-1)
             wp_pred_metric = wp_pred * step_scale
-            dbr_loss, clearance_vector = self.model.dbr_module(wp_pred_metric, depth_map, depth_mask)
+            
+            # Get depth resize ratios for intrinsics adjustment (if available)
+            # Resize ratios are stored as Python floats, but may be batched
+            resize_ratio_h = batch.get('depth_resize_ratio_h', None)
+            resize_ratio_w = batch.get('depth_resize_ratio_w', None)
+            # Extract scalar value if batched (take first element, assume all samples have same ratio)
+            if resize_ratio_h is not None:
+                if isinstance(resize_ratio_h, torch.Tensor):
+                    resize_ratio_h = resize_ratio_h[0].item() if resize_ratio_h.numel() > 0 else None
+                elif isinstance(resize_ratio_h, (list, tuple)):
+                    resize_ratio_h = resize_ratio_h[0] if len(resize_ratio_h) > 0 else None
+            if resize_ratio_w is not None:
+                if isinstance(resize_ratio_w, torch.Tensor):
+                    resize_ratio_w = resize_ratio_w[0].item() if resize_ratio_w.numel() > 0 else None
+                elif isinstance(resize_ratio_w, (list, tuple)):
+                    resize_ratio_w = resize_ratio_w[0] if len(resize_ratio_w) > 0 else None
+            
+            dbr_loss, clearance_vector = self.model.dbr_module(
+                wp_pred_metric, depth_map, depth_mask,
+                resize_ratio_h=resize_ratio_h, resize_ratio_w=resize_ratio_w
+            )
             total_loss = total_loss + dbr_loss
             self.log('train/l_dbr', dbr_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
             # Log average clearance for monitoring
             avg_clearance = clearance_vector.mean()
             self.log('train/avg_clearance', avg_clearance, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+            
+            # Compute and log DBR metrics (DVR and MDM) for monitoring
+            # Get depth resize ratios for intrinsics adjustment (if available)
+            resize_ratio_h_train = batch.get('depth_resize_ratio_h', None)
+            resize_ratio_w_train = batch.get('depth_resize_ratio_w', None)
+            if resize_ratio_h_train is not None:
+                if isinstance(resize_ratio_h_train, torch.Tensor):
+                    resize_ratio_h_train = resize_ratio_h_train[0].item() if resize_ratio_h_train.numel() > 0 else None
+                elif isinstance(resize_ratio_h_train, (list, tuple)):
+                    resize_ratio_h_train = resize_ratio_h_train[0] if len(resize_ratio_h_train) > 0 else None
+            if resize_ratio_w_train is not None:
+                if isinstance(resize_ratio_w_train, torch.Tensor):
+                    resize_ratio_w_train = resize_ratio_w_train[0].item() if resize_ratio_w_train.numel() > 0 else None
+                elif isinstance(resize_ratio_w_train, (list, tuple)):
+                    resize_ratio_w_train = resize_ratio_w_train[0] if len(resize_ratio_w_train) > 0 else None
+            
+            dvr, mdm = self.compute_dbr_metrics(
+                wp_pred_metric, depth_map, depth_mask,
+                resize_ratio_h=resize_ratio_h_train, resize_ratio_w=resize_ratio_w_train
+            )
+            if dvr is not None and mdm is not None:
+                self.log('train/dvr', dvr, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
+                self.log('train/mdm', mdm, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
         
         # Common logs
         self.log('train/l_wp', waypoints_loss, on_step=True, on_epoch=True, prog_bar=False, sync_dist=True)
@@ -99,9 +143,9 @@ class CityWalkerFeatModule(pl.LightningModule):
         else:
             future_obs = None
         
-        # Extract depth data if DBR is enabled
-        depth_map = batch.get('depth_map', None) if self.use_dbr else None
-        depth_mask = batch.get('depth_mask', None) if self.use_dbr else None
+        # Extract depth data if DBR is enabled OR if available for evaluation metrics
+        depth_map = batch.get('depth_map', None)
+        depth_mask = batch.get('depth_mask', None)
         
         wp_pred, arrive_pred, feature_pred, feature_gt = self(obs, cord, future_obs, depth_map, depth_mask)
         losses = self.compute_loss(wp_pred, arrive_pred, feature_pred, feature_gt, batch)
@@ -122,6 +166,26 @@ class CityWalkerFeatModule(pl.LightningModule):
         self.log('val/arrived_accuracy', accuracy, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('val/direction_loss', direction_loss, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         self.log('val/feature_loss', feature_loss, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+        
+        # Compute and log DBR metrics if depth is available (even when use_dbr is False, for comparison)
+        if depth_map is not None:
+            # Scale waypoints to metric space for DBR evaluation
+            step_scale = batch['step_scale'].unsqueeze(-1).unsqueeze(-1)
+            wp_pred_metric = wp_pred * step_scale
+            
+            # Get depth resize ratios for intrinsics adjustment (if available)
+            resize_ratio_h = batch.get('depth_resize_ratio_h', None)
+            resize_ratio_w = batch.get('depth_resize_ratio_w', None)
+            if resize_ratio_h is not None and isinstance(resize_ratio_h, torch.Tensor):
+                resize_ratio_h = resize_ratio_h[0].item() if resize_ratio_h.numel() > 0 else None
+            if resize_ratio_w is not None and isinstance(resize_ratio_w, torch.Tensor):
+                resize_ratio_w = resize_ratio_w[0].item() if resize_ratio_w.numel() > 0 else None
+            
+            dvr, mdm = self.compute_dbr_metrics(wp_pred_metric, depth_map, depth_mask, 
+                                                 resize_ratio_h=resize_ratio_h, resize_ratio_w=resize_ratio_w)
+            if dvr is not None and mdm is not None:
+                self.log('val/dvr', dvr, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
+                self.log('val/mdm', mdm, on_step=False, on_epoch=True, prog_bar=False, sync_dist=True)
         
         # Handle visualization
         wp_pred_vis = wp_pred * batch['step_scale'].unsqueeze(-1).unsqueeze(-1)
@@ -144,9 +208,9 @@ class CityWalkerFeatModule(pl.LightningModule):
             future_obs = None
         B, T, _, _, _ = obs.shape
         
-        # Extract depth data if DBR is enabled
-        depth_map = batch.get('depth_map', None) if self.use_dbr else None
-        depth_mask = batch.get('depth_mask', None) if self.use_dbr else None
+        # Extract depth data if DBR is enabled OR if available for evaluation metrics
+        depth_map = batch.get('depth_map', None)
+        depth_mask = batch.get('depth_mask', None)
         
         # Initialize variables to avoid UnboundLocalError
         wp_pred = None
@@ -185,6 +249,34 @@ class CityWalkerFeatModule(pl.LightningModule):
             # Take mean angle
             mean_angle = angle.mean(dim=0).cpu().numpy()
             
+            # Compute DBR metrics if depth is available (even when use_dbr is False, for comparison)
+            if depth_map is not None:
+                # Scale waypoints to metric space for DBR evaluation
+                step_scale = batch['step_scale'].unsqueeze(-1).unsqueeze(-1)
+                wp_pred_metric = wp_pred * step_scale
+                
+                # Get depth resize ratios for intrinsics adjustment (if available)
+                resize_ratio_h_test = batch.get('depth_resize_ratio_h', None)
+                resize_ratio_w_test = batch.get('depth_resize_ratio_w', None)
+                if resize_ratio_h_test is not None:
+                    if isinstance(resize_ratio_h_test, torch.Tensor):
+                        resize_ratio_h_test = resize_ratio_h_test[0].item() if resize_ratio_h_test.numel() > 0 else None
+                    elif isinstance(resize_ratio_h_test, (list, tuple)):
+                        resize_ratio_h_test = resize_ratio_h_test[0] if len(resize_ratio_h_test) > 0 else None
+                if resize_ratio_w_test is not None:
+                    if isinstance(resize_ratio_w_test, torch.Tensor):
+                        resize_ratio_w_test = resize_ratio_w_test[0].item() if resize_ratio_w_test.numel() > 0 else None
+                    elif isinstance(resize_ratio_w_test, (list, tuple)):
+                        resize_ratio_w_test = resize_ratio_w_test[0] if len(resize_ratio_w_test) > 0 else None
+                
+                dvr, mdm = self.compute_dbr_metrics(
+                    wp_pred_metric, depth_map, depth_mask,
+                    resize_ratio_h=resize_ratio_h_test, resize_ratio_w=resize_ratio_w_test
+                )
+                if dvr is not None and mdm is not None:
+                    self.test_metrics['dvr'].append(dvr)
+                    self.test_metrics['mdm'].append(mdm)
+            
             # Store the metrics
             if self.output_coordinate_repr == "euclidean":
                 self.test_metrics['l1_loss'].append(l1_loss)
@@ -221,6 +313,42 @@ class CityWalkerFeatModule(pl.LightningModule):
 
             gt_wp_last_norm = waypoints_target[:, -1, :].norm(dim=1)
 
+            # Compute DBR metrics if depth is available (for teleop dataset, even when use_dbr is False)
+            batch_dvr = None
+            batch_mdm = None
+            if depth_map is not None:
+                # Compute DBR metrics per batch item
+                batch_dvr_list = []
+                batch_mdm_list = []
+                # Get depth resize ratios for intrinsics adjustment (if available)
+                resize_ratio_h_teleop = batch.get('depth_resize_ratio_h', None)
+                resize_ratio_w_teleop = batch.get('depth_resize_ratio_w', None)
+                if resize_ratio_h_teleop is not None:
+                    if isinstance(resize_ratio_h_teleop, torch.Tensor):
+                        resize_ratio_h_teleop = resize_ratio_h_teleop[0].item() if resize_ratio_h_teleop.numel() > 0 else None
+                    elif isinstance(resize_ratio_h_teleop, (list, tuple)):
+                        resize_ratio_h_teleop = resize_ratio_h_teleop[0] if len(resize_ratio_h_teleop) > 0 else None
+                if resize_ratio_w_teleop is not None:
+                    if isinstance(resize_ratio_w_teleop, torch.Tensor):
+                        resize_ratio_w_teleop = resize_ratio_w_teleop[0].item() if resize_ratio_w_teleop.numel() > 0 else None
+                    elif isinstance(resize_ratio_w_teleop, (list, tuple)):
+                        resize_ratio_w_teleop = resize_ratio_w_teleop[0] if len(resize_ratio_w_teleop) > 0 else None
+                
+                for batch_idx in range(B):
+                    wp_pred_batch = wp_pred[batch_idx:batch_idx+1]  # (1, T, 2)
+                    depth_map_batch = depth_map[batch_idx:batch_idx+1]  # (1, H, W)
+                    depth_mask_batch = depth_mask[batch_idx:batch_idx+1] if depth_mask is not None else None
+                    dvr, mdm = self.compute_dbr_metrics(
+                        wp_pred_batch, depth_map_batch, depth_mask_batch,
+                        resize_ratio_h=resize_ratio_h_teleop, resize_ratio_w=resize_ratio_w_teleop
+                    )
+                    if dvr is not None and mdm is not None:
+                        batch_dvr_list.append(dvr)
+                        batch_mdm_list.append(mdm)
+                if batch_dvr_list:
+                    batch_dvr = np.array(batch_dvr_list)
+                    batch_mdm = np.array(batch_mdm_list)
+
             for batch_idx in range(B):
                 for category_idx in range(self.num_categories):
                     if category[batch_idx, category_idx] == 1:
@@ -234,6 +362,10 @@ class CityWalkerFeatModule(pl.LightningModule):
                             self.test_metrics[category_name]['angle_step3'].append(angle[batch_idx, 2].item())
                             self.test_metrics[category_name]['angle_step4'].append(angle[batch_idx, 3].item())
                             self.test_metrics[category_name]['angle_step5'].append(angle[batch_idx, 4].item())
+                        # Add DBR metrics if available
+                        if batch_dvr is not None and batch_mdm is not None:
+                            self.test_metrics[category_name]['dvr'].append(batch_dvr[batch_idx])
+                            self.test_metrics[category_name]['mdm'].append(batch_mdm[batch_idx])
                     else:
                         continue
                 self.test_metrics['overall']['l1_loss'].append(l1_loss[batch_idx].max().item())
@@ -245,6 +377,10 @@ class CityWalkerFeatModule(pl.LightningModule):
                     self.test_metrics['overall']['angle_step3'].append(angle[batch_idx, 2].item())
                     self.test_metrics['overall']['angle_step4'].append(angle[batch_idx, 3].item())
                     self.test_metrics['overall']['angle_step5'].append(angle[batch_idx, 4].item())
+                # Add DBR metrics if available
+                if batch_dvr is not None and batch_mdm is not None:
+                    self.test_metrics['overall']['dvr'].append(batch_dvr[batch_idx])
+                    self.test_metrics['overall']['mdm'].append(batch_mdm[batch_idx])
 
         
         # Handle visualization
@@ -275,11 +411,27 @@ class CityWalkerFeatModule(pl.LightningModule):
                 save_path = os.path.join(self.result_dir, f'test_{metric}.npy')
                 np.save(save_path, metric_array)
                 if not metric == "mean_angle":
-                    print(f"Test mean {metric} {metric_array.mean():.4f} saved to {save_path}")
+                    mean_val = metric_array.mean()
+                    print(f"Test mean {metric} {mean_val:.4f} saved to {save_path}")
+                    # Log to WandB
+                    self.log(f'test/{metric}', mean_val, on_step=False, on_epoch=True, sync_dist=True)
                 else:
                     mean_angle = metric_array.mean(axis=0)
                     for i in range(len(mean_angle)):
                         print(f"Test mean angle at step {i} {mean_angle[i]:.4f}")
+                        # Log each step's angle to WandB
+                        self.log(f'test/angle_step{i}', mean_angle[i], on_step=False, on_epoch=True, sync_dist=True)
+                    # Also log mean of all steps
+                    self.log('test/mean_angle_all', mean_angle.mean(), on_step=False, on_epoch=True, sync_dist=True)
+            # Print DBR metrics summary if available (already logged above in loop)
+            if 'dvr' in self.test_metrics and 'mdm' in self.test_metrics:
+                dvr_array = np.array(self.test_metrics['dvr'])
+                mdm_array = np.array(self.test_metrics['mdm'])
+                if len(dvr_array) > 0:
+                    dvr_mean = dvr_array.mean()
+                    mdm_mean = mdm_array.mean()
+                    print(f"Test mean DVR (Depth Violation Rate): {dvr_mean:.4f}%")
+                    print(f"Test mean MDM (Min-Depth Margin): {mdm_mean:.4f}m")
         elif self.datatype == "teleop":
             import pandas as pd
             for category in self.test_catetories:
@@ -297,12 +449,27 @@ class CityWalkerFeatModule(pl.LightningModule):
                 if metric != 'count':
                     self.test_metrics['overall'][metric] = np.nanmean(np.array(self.test_metrics['overall'][metric]))
             metrics = ['l1_loss', 'arrived_accuracy', 'angle_step1', 'angle_step2', 'angle_step3', 'angle_step4', 'angle_step5', 'mean_angle']
+            # Always include DBR metrics if available (even when use_dbr is False, for comparison)
+            if 'dvr' in self.test_metrics.get('overall', {}):
+                metrics.extend(['dvr', 'mdm'])
             for metric in metrics:
                 category_val = []
                 for category in self.test_catetories:
-                    category_val.append(self.test_metrics[category][metric])
-                self.test_metrics['mean'][metric] = np.array(category_val).mean()
-                print(f"{metric}: Sample mean {self.test_metrics['overall'][metric]:.4f}, Category mean {self.test_metrics['mean'][metric]:.4f}")
+                    if metric in self.test_metrics[category]:
+                        category_val.append(self.test_metrics[category][metric])
+                if category_val:
+                    self.test_metrics['mean'][metric] = np.array(category_val).mean()
+                    overall_val = self.test_metrics['overall'][metric]
+                    mean_val = self.test_metrics['mean'][metric]
+                    print(f"{metric}: Sample mean {overall_val:.4f}, Category mean {mean_val:.4f}")
+                    # Log to WandB
+                    self.log(f'test/{metric}_overall', overall_val, on_step=False, on_epoch=True, sync_dist=True)
+                    self.log(f'test/{metric}_mean', mean_val, on_step=False, on_epoch=True, sync_dist=True)
+                # Also log per-category metrics
+                for category in self.test_catetories:
+                    if metric in self.test_metrics[category]:
+                        category_val = self.test_metrics[category][metric]
+                        self.log(f'test/{category}/{metric}', category_val, on_step=False, on_epoch=True, sync_dist=True)
 
             df = pd.DataFrame(self.test_metrics)
             df = df.reset_index().rename(columns={'index': 'Metrics'})
@@ -318,8 +485,14 @@ class CityWalkerFeatModule(pl.LightningModule):
         if self.datatype == "citywalk" or self.datatype == "citywalk_feat":
             if self.output_coordinate_repr == "euclidean":
                 self.test_metrics = {'l1_loss': [], 'arrived_accuracy': [], 'mean_angle': []}
+                # Always add DBR metrics (even when use_dbr is False, for comparison)
+                self.test_metrics['dvr'] = []  # Depth Violation Rate
+                self.test_metrics['mdm'] = []  # Min-Depth Margin
             elif self.output_coordinate_repr == "polar":
                 self.test_metrics = {'distance_loss': [], 'angle_loss': [], 'arrived_accuracy': [], 'mean_angle': []}
+                # Always add DBR metrics (even when use_dbr is False, for comparison)
+                self.test_metrics['dvr'] = []
+                self.test_metrics['mdm'] = []
         elif self.datatype == "teleop":
             self.test_metrics = {}
             categories = self.test_catetories[:]
@@ -336,8 +509,98 @@ class CityWalkerFeatModule(pl.LightningModule):
                         'angle_step5': [],
                         'mean_angle': []
                     }
+                    # Always add DBR metrics (even when use_dbr is False, for comparison)
+                    self.test_metrics[category]['dvr'] = []
+                    self.test_metrics[category]['mdm'] = []
                 elif self.output_coordinate_repr == "polar":
                     raise ValueError("Polar representation is not supported for teleop dataset.")
+
+    def compute_dbr_metrics(self, wp_pred_metric, depth_map, depth_mask, resize_ratio_h=None, resize_ratio_w=None):
+        """
+        Compute DBR safety metrics: DVR (Depth Violation Rate) and MDM (Min-Depth Margin).
+        
+        This works even when use_dbr is False - it creates a temporary DBR module for evaluation.
+        This allows comparing baseline models (no DBR training) with DBR-trained models.
+        
+        Args:
+            wp_pred_metric: (B, T, 2) predicted waypoints in metric space
+            depth_map: (B, H, W) depth values in meters
+            depth_mask: (B, H, W) optional mask for valid depth pixels
+            resize_ratio_h: Optional height resize ratio for intrinsics adjustment
+            resize_ratio_w: Optional width resize ratio for intrinsics adjustment
+            
+        Returns:
+            dvr: Depth Violation Rate (% of steps where d_min < margin)
+            mdm: Min-Depth Margin (mean d_min across all waypoints)
+        """
+        if depth_map is None:
+            return None, None
+        
+        # Get DBR module if available, otherwise create a temporary one for evaluation
+        if self.use_dbr and hasattr(self.model, 'dbr_module'):
+            dbr_module = self.model.dbr_module
+            polar_reducer = dbr_module.polar_reducer
+            barrier_loss = dbr_module.barrier_loss
+            margin = barrier_loss.margin
+        else:
+            # Create a temporary DBR module for evaluation only
+            # Use default DBR config values
+            from model.dbr import DBRModule
+            import types
+            
+            # Create a minimal config object with DBR defaults
+            class DBRConfig:
+                def __init__(self):
+                    self.num_bins = 32
+                    self.temperature = 20.0
+                    self.crop_bottom_ratio = 0.6
+                    self.fov_horizontal = 90.0
+                    self.margin = 0.5  # Default safety margin
+                    self.weight = 1.0
+                    self.fx = 320.0
+                    self.fy = 320.0
+                    self.cx = 320.0
+                    self.cy = 180.0
+            
+            class ModelConfig:
+                def __init__(self):
+                    self.dbr = DBRConfig()
+            
+            class TempConfig:
+                def __init__(self):
+                    self.model = ModelConfig()
+            
+            temp_cfg = TempConfig()
+            temp_dbr_module = DBRModule(temp_cfg)
+            temp_dbr_module.eval()  # Set to eval mode
+            if depth_map.is_cuda:
+                temp_dbr_module = temp_dbr_module.cuda()
+            
+            polar_reducer = temp_dbr_module.polar_reducer
+            barrier_loss = temp_dbr_module.barrier_loss
+            margin = barrier_loss.margin
+        
+        # Convert depth to polar clearance vector with adjusted intrinsics
+        clearance_vector, bin_centers = polar_reducer(
+            depth_map, depth_mask, 
+            resize_ratio_h=resize_ratio_h, resize_ratio_w=resize_ratio_w
+        )
+        
+        # Compute yaw angles for each waypoint
+        B, T, _ = wp_pred_metric.shape
+        yaw_angles = torch.atan2(wp_pred_metric[:, :, 1], wp_pred_metric[:, :, 0])  # (B, T)
+        
+        # Interpolate clearance at each waypoint direction
+        d_min = barrier_loss.bilinear_interpolate(clearance_vector, bin_centers, yaw_angles)  # (B, T)
+        
+        # Compute DVR: % of waypoints where d_min < margin
+        violations = (d_min < margin).float()  # (B, T)
+        dvr = violations.mean().item() * 100.0  # Convert to percentage
+        
+        # Compute MDM: mean d_min across all waypoints
+        mdm = d_min.mean().item()
+        
+        return dvr, mdm
 
     def compute_loss(self, wp_pred, arrive_pred, feature_pred, feature_gt, batch):
         waypoints_target = batch['waypoints']

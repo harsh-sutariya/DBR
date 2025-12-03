@@ -1,6 +1,6 @@
 project:
   name: 'CityWalker'
-  run_name: 'train_dbr_fixed'
+  run_name: 'train_frodobots_dbr'
   result_dir: 'results'
 
 wandb: true  # Set to false to disable Wandb logging
@@ -80,22 +80,23 @@ model:
 
 data:
   type: citywalk_feat
-  # Root path to vast storage where datasets are stored
-  vast_path: '/vast/hs5580/data/citywalker'
-  # Relative paths from vast_path root (videos are directly in citywalk_2min/, poses in citywalk_2min/poses/)
-  video_dir: 'citywalk_2min'
-  pose_dir: 'citywalk_2min/poses'
+  # Root path to vast storage where frodobots datasets are stored
+  vast_path: '/vast/hs5580/data/frodobots_2k/extracted'
+  # For frodobots, the structure is complex with part_X/output_rides_X/ and part_X/ directories
+  video_dir: 'frodobots_videos'  # Special handling in dataset class
+  pose_dir: 'frodobots_poses'   # Special handling in dataset class  
+  frodobots_structure: true      # Flag to enable special frodobots path handling
   depth_dir: 'depths'
   # Whether to cache depth in memory ('on_the_fly' or 'preload')
   depth_cache_mode: 'on_the_fly'
   
   num_workers: 4
-  pose_fps: 5
+  pose_fps: 1
   video_fps: 30
   target_fps: 1
-  num_train: 2108  # ~80% of 2635 total pose files
-  num_val: 527     # ~20% of 2635 total pose files
-  num_test: 0      # No test set (use val for evaluation)
+  num_train: 100000
+  num_val: 1000
+  num_test: 0
   input_noise: 0.1
   search_window: 50
   arrived_threshold: 5

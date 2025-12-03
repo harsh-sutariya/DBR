@@ -95,7 +95,7 @@ class CityWalkerFeat(nn.Module):
             if future_obs is not None:
                 future_obs = (future_obs - self.mean) / self.std
         if self.do_resize:
-            obs = TF.center_crop(obs, self. crop)
+            obs = TF.center_crop(obs, self.crop)
             obs = TF.resize(obs, self.resize)
             if future_obs is not None:
                 future_obs = TF.center_crop(future_obs, self.crop)

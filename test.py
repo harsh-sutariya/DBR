@@ -109,13 +109,49 @@ def main():
 
     # Initialize Trainer (consistent with training configuration)
     num_gpu = torch.cuda.device_count()
+    
+    # Initialize logger
+    logger = None  # Default to no logger
+    
+    # Check if logging with Wandb is enabled in config
+    # Support both top-level 'wandb' and 'logging.enable_wandb' for backward compatibility
+    use_wandb = getattr(cfg, 'wandb', None)
+    if use_wandb is None:
+        use_wandb = getattr(cfg.logging, 'enable_wandb', False)
+    
+    if use_wandb:
+        try:
+            from pytorch_lightning.loggers import WandbLogger
+            import wandb
+            
+            # Generate unique run ID for test
+            # Use job ID from environment if available, otherwise timestamp
+            job_id = os.environ.get('SLURM_JOB_ID', None)
+            if job_id:
+                run_id = f"{cfg.project.run_name}_test_{job_id}"
+            else:
+                import time
+                run_id = f"{cfg.project.run_name}_test_{int(time.time())}"
+            
+            wandb_logger = WandbLogger(
+                project=cfg.project.name,
+                name=f"{cfg.project.run_name}_test",
+                id=run_id,
+                save_dir=test_dir,
+                resume="never"
+            )
+            logger = wandb_logger
+            print(f"WandbLogger initialized for test with unique ID: {run_id}")
+        except ImportError:
+            print("Wandb is not installed. Skipping Wandb logging.")
+    
     if num_gpu > 1:
         trainer = pl.Trainer(
             default_root_dir=test_dir,
             devices=num_gpu,
             precision='16-mixed' if cfg.training.amp else 32,
             accelerator='gpu',
-            logger=False,
+            logger=logger,  # Use logger if WandB is enabled, otherwise False
             strategy=DDPStrategy(find_unused_parameters=True)
         )
     else:
@@ -124,7 +160,7 @@ def main():
             devices=num_gpu,
             precision='16-mixed' if cfg.training.amp else 32,
             accelerator='gpu',
-            logger=False
+            logger=logger  # Use logger if WandB is enabled, otherwise False
         )
 
     # Run testing

@@ -53,6 +53,7 @@ class DepthPolarReducer(nn.Module):
     def compute_per_pixel_yaw(self, H, W):
         """
         Compute per-pixel yaw angles α(u,v) = arctan2((u-cx)/fx, 1)
+        Uses stored intrinsics (for backward compatibility).
         
         Args:
             H, W: Height and width of the depth map
@@ -60,17 +61,7 @@ class DepthPolarReducer(nn.Module):
         Returns:
             yaw_map: (H, W) tensor of yaw angles
         """
-        # Create pixel coordinate grid
-        # We want the result to be (H, W), so create grids accordingly
-        v = torch.arange(H, device=self.fy.device).float()  # height indices
-        u = torch.arange(W, device=self.fx.device).float()  # width indices
-        v_grid, u_grid = torch.meshgrid(v, u, indexing='ij')  # (H, W) grids
-        
-        # Compute yaw per pixel
-        yaw_map = torch.atan2((u_grid - self.cx) / self.fx, 
-                             torch.ones_like(u_grid))
-        
-        return yaw_map  # (H, W)
+        return self._compute_per_pixel_yaw_with_intrinsics(H, W, self.fx, self.fy, self.cx, self.cy)
     
     def compute_triangular_weights(self, yaw_map):
         """
@@ -135,19 +126,35 @@ class DepthPolarReducer(nn.Module):
         
         return min_depths  # (B, num_bins)
     
-    def forward(self, depth_map, mask=None):
+    def forward(self, depth_map, mask=None, resize_ratio_h=None, resize_ratio_w=None):
         """
         Convert depth map to polar clearance vector.
         
         Args:
             depth_map: (B, H, W) depth values in meters
             mask: (B, H, W) optional boolean mask (True for valid pixels)
+            resize_ratio_h: Optional height resize ratio (new_h / orig_h) for intrinsics adjustment
+            resize_ratio_w: Optional width resize ratio (new_w / orig_w) for intrinsics adjustment
             
         Returns:
             clearance_vector: (B, num_bins) min depth per yaw bin
             bin_centers: (num_bins,) yaw angle for each bin center
         """
         B, H, W = depth_map.shape
+        
+        # Adjust intrinsics if depth was resized
+        # When depth is resized, camera intrinsics need to be scaled proportionally
+        if resize_ratio_h is not None and resize_ratio_w is not None:
+            fx_adjusted = self.fx * resize_ratio_w
+            fy_adjusted = self.fy * resize_ratio_h
+            cx_adjusted = self.cx * resize_ratio_w
+            cy_adjusted = self.cy * resize_ratio_h
+        else:
+            # Use original intrinsics (assume depth matches intrinsics resolution)
+            fx_adjusted = self.fx
+            fy_adjusted = self.fy
+            cx_adjusted = self.cx
+            cy_adjusted = self.cy
         
         # Crop to bottom portion (focus on ground-level obstacles)
         crop_start = int(H * (1.0 - self.crop_bottom_ratio))
@@ -157,9 +164,14 @@ class DepthPolarReducer(nn.Module):
         else:
             mask_cropped = None
         
-        # Compute per-pixel yaw for cropped region
+        # Adjust cy for cropped region
+        cy_crop_adjusted = cy_adjusted - crop_start
+        
+        # Compute per-pixel yaw for cropped region using adjusted intrinsics
         H_crop = depth_cropped.shape[1]
-        yaw_map = self.compute_per_pixel_yaw(H_crop, W)  # (H_crop, W)
+        yaw_map = self._compute_per_pixel_yaw_with_intrinsics(
+            H_crop, W, fx_adjusted, fy_adjusted, cx_adjusted, cy_crop_adjusted
+        )  # (H_crop, W)
         
         # Compute triangular weights
         weights = self.compute_triangular_weights(yaw_map)  # (num_bins, H_crop, W)
@@ -168,6 +180,27 @@ class DepthPolarReducer(nn.Module):
         clearance_vector = self.soft_min_depth(depth_cropped, weights, mask_cropped)
         
         return clearance_vector, self.bin_centers
+    
+    def _compute_per_pixel_yaw_with_intrinsics(self, H, W, fx, fy, cx, cy):
+        """
+        Compute per-pixel yaw angles with given intrinsics.
+        
+        Args:
+            H, W: Height and width of the depth map
+            fx, fy, cx, cy: Camera intrinsics
+            
+        Returns:
+            yaw_map: (H, W) tensor of yaw angles
+        """
+        # Create pixel coordinate grid
+        v = torch.arange(H, device=fy.device).float()  # height indices
+        u = torch.arange(W, device=fx.device).float()  # width indices
+        v_grid, u_grid = torch.meshgrid(v, u, indexing='ij')  # (H, W) grids
+        
+        # Compute yaw per pixel: α(u,v) = arctan2((u-cx)/fx, 1)
+        yaw_map = torch.atan2((u_grid - cx) / fx, torch.ones_like(u_grid))
+        
+        return yaw_map  # (H, W)
 
 
 class BarrierLoss(nn.Module):
@@ -285,7 +318,7 @@ class DBRModule(nn.Module):
             weight=dbr_cfg.weight
         )
     
-    def forward(self, waypoints, depth_map, depth_mask=None):
+    def forward(self, waypoints, depth_map, depth_mask=None, resize_ratio_h=None, resize_ratio_w=None):
         """
         Compute DBR loss for predicted waypoints given depth map.
         
@@ -293,13 +326,17 @@ class DBRModule(nn.Module):
             waypoints: (B, T, 2) predicted waypoints in ego frame
             depth_map: (B, H, W) depth values in meters
             depth_mask: (B, H, W) optional mask for valid depth pixels
+            resize_ratio_h: Optional height resize ratio for intrinsics adjustment
+            resize_ratio_w: Optional width resize ratio for intrinsics adjustment
             
         Returns:
             loss: scalar DBR loss
             clearance_vector: (B, num_bins) for visualization/logging
         """
-        # Convert depth to polar clearance
-        clearance_vector, bin_centers = self.polar_reducer(depth_map, depth_mask)
+        # Convert depth to polar clearance with adjusted intrinsics
+        clearance_vector, bin_centers = self.polar_reducer(
+            depth_map, depth_mask, resize_ratio_h=resize_ratio_h, resize_ratio_w=resize_ratio_w
+        )
         
         # Compute barrier loss
         loss = self.barrier_loss(waypoints, clearance_vector, bin_centers)

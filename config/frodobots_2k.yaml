@@ -1,10 +1,12 @@
 project:
-  name: 'CityWalker'
+  name: 'CityWalker'  
   run_name: 'train_frodobots_2k'
   result_dir: 'results'
 
+wandb: false  # Set to false to disable Wandb logging
+
 training:
-  batch_size: 8
+  batch_size: 4
   max_epochs: 10
   gpus: 4
   amp: true  
@@ -12,6 +14,8 @@ training:
   resume: false
   direction_loss_weight: 5.0
   feature_loss_weight: 0.1
+  test_after_training: true
+  quick_debug: false  # Set to true for fast debugging (reduces data, batches, epochs)
 
 scheduler:
   name: 'cosine'
@@ -56,12 +60,17 @@ data:
   video_dir: 'frodobots_videos'  # Special handling in dataset class
   pose_dir: 'frodobots_poses'   # Special handling in dataset class  
   frodobots_structure: true      # Flag to enable special frodobots path handling
-  num_workers: 8  # Reduced for 4-GPU training (8 workers per GPU = 32 total)
+  # Depth directory for evaluation metrics (DVR/MDM) - loaded during val/test even when use_dbr: false
+  depth_dir: 'depths'
+  # Whether to cache depth in memory ('on_the_fly' or 'preload')
+  depth_cache_mode: 'on_the_fly'
+  
+  num_workers: 4  # Reduced for 4-GPU training (8 workers per GPU = 32 total)
   pose_fps: 1
   video_fps: 30
   target_fps: 1
-  num_train: 100000  #(400 - 5 - 5) ÷ 5 = 77 samples per video 
-  num_val: 1000        # Using 1000 validation samples
+  num_train: 100000
+  num_val: 1000
   num_test: 0
   input_noise: 0.1 # sigma (after normalization)
   search_window: 50 # frames
@@ -70,6 +79,7 @@ data:
 
 validation:
   num_visualize: 400
+  
 testing:
   num_visualize: 400
 

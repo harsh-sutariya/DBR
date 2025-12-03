@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, Sampler
 import torchvision.transforms.functional as TF
 from decord import VideoReader, cpu
@@ -64,10 +65,25 @@ class CityWalkFeatDataset(Dataset):
         self.search_window = cfg.data.search_window
         self.arrived_threshold = cfg.data.arrived_threshold
         self.arrived_prob = cfg.data.arrived_prob
+        
+        # Get final RGB resolution after model resizing (for depth alignment)
+        # Model resizes RGB: dataset (360,640) -> model crop+resize -> final resolution
+        if cfg.model.do_resize:
+            # Final resolution is the resize target (after center crop)
+            self.final_rgb_resolution = cfg.model.obs_encoder.resize  # [H, W] format
+        else:
+            # If no model resize, use dataset resolution
+            self.final_rgb_resolution = [360, 640]  # Default dataset resolution
 
         # DBR (Depth Barrier Regularization) support
         self.use_dbr = getattr(cfg.model, 'use_dbr', False)
-        if self.use_dbr:
+        
+        # Also load depth for evaluation metrics even when DBR is disabled
+        # This allows comparing DVR/MDM metrics between baseline and DBR-trained models
+        self.use_dbr_for_training = self.use_dbr
+        self.load_depth_for_eval = (mode in ['val', 'test']) and getattr(cfg.data, 'depth_dir', None) is not None
+        
+        if self.use_dbr or self.load_depth_for_eval:
             depth_dir_config = getattr(cfg.data, 'depth_dir', None)
             if depth_dir_config and vast_path:
                 self.depth_dir = os.path.join(vast_path, depth_dir_config)
@@ -78,23 +94,34 @@ class CityWalkFeatDataset(Dataset):
             
             if self.depth_mode == 'precomputed':
                 if self.depth_dir is None:
-                    raise ValueError("DBR is enabled with precomputed mode but depth_dir is not specified")
-                self.depth_cache_mode = getattr(cfg.data, 'depth_cache_mode', 'on_the_fly')
-                self.depth_cache = {}  # Cache for preloaded depth data
+                    if self.use_dbr:
+                        raise ValueError("DBR is enabled with precomputed mode but depth_dir is not specified")
+                    else:
+                        # For eval-only depth loading, allow None and skip depth loading
+                        self.depth_dir = None
+                        self.depth_mode = None
+                else:
+                    self.depth_cache_mode = getattr(cfg.data, 'depth_cache_mode', 'on_the_fly')
+                    self.depth_cache = {}  # Cache for preloaded depth data
             elif self.depth_mode == 'online':
                 # Load depth model for online inference
                 print("Loading depth model for online inference...")
                 from model.depth_teacher import load_depth_teacher
                 depth_checkpoint = getattr(cfg.data, 'depth_checkpoint', None)
                 if depth_checkpoint is None:
-                    raise ValueError("DBR online mode requires depth_checkpoint in config")
-                self.depth_model = load_depth_teacher(
-                    model_size=getattr(cfg.data, 'depth_model_size', 'small'),
-                    max_depth=getattr(cfg.data, 'depth_max_depth', 20.0),
-                    checkpoint_path=depth_checkpoint,
-                    device='cuda' if torch.cuda.is_available() else 'cpu'
-                )
-                print(f"Depth model loaded successfully ({cfg.data.depth_model_size})")
+                    if self.use_dbr:
+                        raise ValueError("DBR online mode requires depth_checkpoint in config")
+                    else:
+                        # For eval-only, skip online depth
+                        self.depth_mode = None
+                else:
+                    self.depth_model = load_depth_teacher(
+                        model_size=getattr(cfg.data, 'depth_model_size', 'small'),
+                        max_depth=getattr(cfg.data, 'depth_max_depth', 20.0),
+                        checkpoint_path=depth_checkpoint,
+                        device='cuda' if torch.cuda.is_available() else 'cpu'
+                    )
+                    print(f"Depth model loaded successfully ({cfg.data.depth_model_size})")
             else:
                 raise ValueError(f"Invalid depth_mode: {self.depth_mode}. Use 'precomputed' or 'online'")
         else:
@@ -124,14 +151,33 @@ class CityWalkFeatDataset(Dataset):
                 if f.endswith('.txt')
             ]
         print(len(self.pose_path))
+        total_files = len(self.pose_path)
+        
+        # Sequential splitting to avoid overlap between train/val/test
         if mode == 'train':
             self.pose_path = self.pose_path[:cfg.data.num_train]
         elif mode == 'val':
-                        self.pose_path = self.pose_path[-cfg.data.num_val:]
+            # Start after train split
+            val_start = cfg.data.num_train
+            val_end = val_start + cfg.data.num_val
+            self.pose_path = self.pose_path[val_start:val_end]
         elif mode == 'test':
-            self.pose_path = self.pose_path[-cfg.data.num_test:]
+            # Start after train + val splits
+            test_start = cfg.data.num_train + cfg.data.num_val
+            test_end = test_start + cfg.data.num_test if cfg.data.num_test > 0 else total_files
+            self.pose_path = self.pose_path[test_start:test_end]
         else:
             raise ValueError(f"Invalid mode {mode}")
+        
+        # Warn if requested split exceeds available files
+        if mode == 'train' and cfg.data.num_train > total_files:
+            print(f"Warning: num_train ({cfg.data.num_train}) exceeds available files ({total_files}). Using all {total_files} files.")
+        elif mode == 'val' and (cfg.data.num_train + cfg.data.num_val) > total_files:
+            available_val = max(0, total_files - cfg.data.num_train)
+            print(f"Warning: Requested val split exceeds available files. Using {available_val} files for validation.")
+        elif mode == 'test' and cfg.data.num_test > 0 and (cfg.data.num_train + cfg.data.num_val + cfg.data.num_test) > total_files:
+            available_test = max(0, total_files - cfg.data.num_train - cfg.data.num_val)
+            print(f"Warning: Requested test split exceeds available files. Using {available_test} files for testing.")
 
         # Load corresponding video paths
         self.video_path = []
@@ -167,8 +213,8 @@ class CityWalkFeatDataset(Dataset):
                 raise FileNotFoundError(f"Video file {video} does not exist.")
             self.video_path.append(video)
 
-        # Load corresponding depth paths if DBR is enabled
-        if self.use_dbr and self.depth_mode == 'precomputed':
+        # Load corresponding depth paths if DBR is enabled OR if we need depth for evaluation
+        if (self.use_dbr or self.load_depth_for_eval) and self.depth_mode == 'precomputed':
             self.depth_path = []
             for f in self.pose_path:
                 depth_file = os.path.basename(f).replace(".txt", "_depth.npy")
@@ -253,7 +299,7 @@ class CityWalkFeatDataset(Dataset):
             depth_map: (H, W) depth values in meters
             depth_mask: (H, W) boolean mask for valid depth pixels
         """
-        if not self.use_dbr:
+        if not self.use_dbr and not self.load_depth_for_eval:
             return None, None
             
         if self.depth_mode == 'online':
@@ -402,9 +448,11 @@ class CityWalkFeatDataset(Dataset):
             'step_scale': step_scale
         }
 
-        # Add depth data if DBR is enabled
-        if self.use_dbr:
-            # Load depth data for the last observation frame
+        # Add depth data if DBR is enabled OR if we need it for evaluation metrics
+        if self.use_dbr or self.load_depth_for_eval:
+            # For online depth: use the last frame AFTER dataset processing (at 360x640)
+            # This ensures depth is computed at a consistent resolution
+            # For precomputed depth: load from file
             last_frame_tensor = input_frames[-1] if self.depth_mode == 'online' else None
             depth_map, depth_mask = self.load_depth_frames(video_idx, pose_start, last_frame_tensor)
             
@@ -414,9 +462,50 @@ class CityWalkFeatDataset(Dataset):
                     print(f"Warning: Invalid depth shape - depth_map: {depth_map.shape}, depth_mask: {depth_mask.shape}")
                     # Skip depth for this sample
                 else:
-                    # Ensure tensors are contiguous and don't share memory to avoid collation issues
-                    sample['depth_map'] = torch.from_numpy(np.ascontiguousarray(depth_map)).float().clone()
-                    sample['depth_mask'] = torch.from_numpy(np.ascontiguousarray(depth_mask)).bool().clone()
+                    # Resize depth maps to match FINAL RGB resolution after model processing
+                    # This ensures depth and RGB are geometrically aligned for DBR
+                    # Final resolution is from model.obs_encoder.resize (e.g., [350, 630])
+                    # 
+                    # IMPORTANT: We resize depth to match final RGB resolution (not intermediate 360x640)
+                    # This preserves geometric correctness: depth pixel (u,v) corresponds to RGB pixel (u,v)
+                    # Camera intrinsics are adjusted proportionally to maintain correct yaw angle computation
+                    desired_height = self.final_rgb_resolution[0]
+                    desired_width = self.final_rgb_resolution[1]
+                    
+                    # Get original depth resolution for intrinsics adjustment
+                    orig_height, orig_width = depth_map.shape
+                    
+                    # Convert to tensors and add batch/channel dimensions for interpolation
+                    depth_map_tensor = torch.from_numpy(np.ascontiguousarray(depth_map)).float()
+                    depth_mask_tensor = torch.from_numpy(np.ascontiguousarray(depth_mask)).float()
+                    
+                    # Add dimensions: (H, W) -> (1, 1, H, W) for interpolation
+                    depth_map_tensor = depth_map_tensor.unsqueeze(0).unsqueeze(0)
+                    depth_mask_tensor = depth_mask_tensor.unsqueeze(0).unsqueeze(0)
+                    
+                    # Resize to match final RGB resolution
+                    # Use bilinear for depth_map (smooth interpolation) and nearest for depth_mask (preserve binary values)
+                    depth_map_tensor = F.interpolate(
+                        depth_map_tensor, 
+                        size=(desired_height, desired_width), 
+                        mode='bilinear', 
+                        align_corners=False
+                    )
+                    depth_mask_tensor = F.interpolate(
+                        depth_mask_tensor, 
+                        size=(desired_height, desired_width), 
+                        mode='nearest'
+                    )
+                    
+                    # Remove batch/channel dimensions and ensure independent copies
+                    sample['depth_map'] = depth_map_tensor.squeeze().clone()
+                    sample['depth_mask'] = depth_mask_tensor.squeeze().bool().clone()
+                    
+                    # Store resize ratios for camera intrinsics adjustment in DBR module
+                    # DBR module will use these to adjust intrinsics for correct yaw computation
+                    # Store as Python floats (not tensors) for easier handling in collate function
+                    sample['depth_resize_ratio_h'] = float(desired_height / orig_height)
+                    sample['depth_resize_ratio_w'] = float(desired_width / orig_width)
 
         # For visualization during validation
         if self.mode in ['val', 'test']:
